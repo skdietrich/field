@@ -1,0 +1,94 @@
+name: Build FieldIndex 0.11.1 Windows Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Locate and unpack uploaded build kit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -File -Filter 'FieldIndex_0_11_1_Clean_Offline_Installer_BUILD_KIT*.zip' | Select-Object -First 1
+          if (-not $archive) {
+            throw 'Missing build-kit ZIP at repository root. Upload FieldIndex_0_11_1_Clean_Offline_Installer_BUILD_KIT.zip to the Code tab on the main branch.'
+          }
+          Write-Host "Build input: $($archive.Name)"
+          Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256 | Format-List
+          $destination = Join-Path $env:GITHUB_WORKSPACE '_fieldindex_build'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination -Force
+          $buildFile = Join-Path $destination 'BUILD_ON_WINDOWS.ps1'
+          $workflowFile = Join-Path $destination '.github\workflows\build-windows.yml'
+          if (-not (Test-Path -LiteralPath $buildFile)) {
+            throw 'The uploaded ZIP does not contain BUILD_ON_WINDOWS.ps1 at its root.'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $destination 'source\fieldindex.py'))) {
+            throw 'The uploaded ZIP is missing source/fieldindex.py.'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $destination 'installer\FieldIndex_Clean.iss'))) {
+            throw 'The uploaded ZIP is missing the Inno Setup recipe.'
+          }
+          Write-Host 'Verified expected build-kit structure.'
+
+      - name: Set up Python for Windows build machine
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+
+      - name: Install Inno Setup on build machine
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            choco install innosetup --yes --no-progress --limit-output
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed on GitHub runner.' }
+          }
+
+      - name: Test source and compile standalone Windows EXE and installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:GITHUB_WORKSPACE\_fieldindex_build\BUILD_ON_WINDOWS.ps1"
+          if ($LASTEXITCODE -ne 0) { throw 'FieldIndex build script failed.' }
+
+      - name: Write installer checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = "$env:GITHUB_WORKSPACE\_fieldindex_build\buildout\release\FieldIndex_0_11_1_Offline_Setup_x64.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw 'The expected installer EXE was not generated.' }
+          (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash | Set-Content -Encoding ascii "$exe.sha256"
+          Write-Host "Installer SHA256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
+
+      - name: Upload compiled installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FieldIndex-0.11.1-Windows-Installer-UNSIGNED
+          path: |
+            _fieldindex_build/buildout/release/FieldIndex_0_11_1_Offline_Setup_x64.exe
+            _fieldindex_build/buildout/release/FieldIndex_0_11_1_Offline_Setup_x64.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FieldIndex-build-diagnostics
+          path: |
+            _fieldindex_build/buildout/smoke-result.txt
+            _fieldindex_build/buildout/spec/FieldIndex.spec
+          if-no-files-found: warn
+          retention-days: 14
